@@ -1,9 +1,10 @@
+import type { APIRoute } from "astro"
 import type { ParsedEvent, ReconnectInterval } from "eventsource-parser"
 import { createParser } from "eventsource-parser"
 import type { ChatMessage, Model } from "~/types"
+import { countTokens } from "~/utils/tokens"
 import { splitKeys, randomKey, fetchWithTimeout } from "~/utils"
-import { defaultEnv } from "~/env"
-import type { APIEvent } from "solid-start/api"
+import { defaultMaxInputTokens, defaultModel } from "~/system"
 
 export const config = {
   runtime: "edge",
@@ -34,23 +35,40 @@ export const config = {
   ]
 }
 
-export const localKey = process.env.OPENAI_API_KEY || ""
+export const localKey = import.meta.env.OPENAI_API_KEY || ""
 
-export const baseURL =
-  process.env.NO_GFW !== "false"
-    ? defaultEnv.OPENAI_API_BASE_URL
-    : (
-        process.env.OPENAI_API_BASE_URL || defaultEnv.OPENAI_API_BASE_URL
-      ).replace(/^https?:\/\//, "")
+export const baseURL = import.meta.env.NOGFW
+  ? "api.openai.com"
+  : (import.meta.env.OPENAI_API_BASE_URL || "api.openai.com").replace(
+      /^https?:\/\//,
+      ""
+    )
 
-// + 作用是将字符串转换为数字
-const timeout = isNaN(+process.env.TIMEOUT!)
-  ? defaultEnv.TIMEOUT
-  : +process.env.TIMEOUT!
+const timeout = Number(import.meta.env.TIMEOUT)
 
-const passwordSet = process.env.PASSWORD || defaultEnv.PASSWORD
+let maxInputTokens = defaultMaxInputTokens
+const _ = import.meta.env.MAX_INPUT_TOKENS
+if (_) {
+  try {
+    if (Number.isInteger(Number(_))) {
+      maxInputTokens = Object.entries(maxInputTokens).reduce((acc, [k]) => {
+        acc[k as Model] = Number(_)
+        return acc
+      }, {} as typeof maxInputTokens)
+    } else {
+      maxInputTokens = {
+        ...maxInputTokens,
+        ...JSON.parse(_)
+      }
+    }
+  } catch (e) {
+    console.error("Error parsing MAX_INPUT_TOKEN:", e)
+  }
+}
 
-export async function POST({ request }: APIEvent) {
+const pwd = import.meta.env.PASSWORD
+
+export const post: APIRoute = async context => {
   try {
     const body: {
       messages?: ChatMessage[]
@@ -58,10 +76,16 @@ export async function POST({ request }: APIEvent) {
       temperature: number
       password?: string
       model: Model
-    } = await request.json()
-    const { messages, key = localKey, temperature, password, model } = body
+    } = await context.request.json()
+    const {
+      messages,
+      key = localKey,
+      temperature = 0.6,
+      password,
+      model = defaultModel
+    } = body
 
-    if (passwordSet && password !== passwordSet) {
+    if (pwd && pwd !== password) {
       throw new Error("密码错误，请联系网站管理员。")
     }
 
@@ -90,6 +114,21 @@ export async function POST({ request }: APIEvent) {
 
     if (!apiKey) throw new Error("没有填写 OpenAI API key，或者 key 填写错误。")
 
+    const tokens = messages.reduce((acc, cur) => {
+      const tokens = countTokens(cur.content)
+      return acc + tokens
+    }, 0)
+
+    if (
+      tokens > (body.key ? defaultMaxInputTokens[model] : maxInputTokens[model])
+    ) {
+      if (messages.length > 1)
+        throw new Error(
+          `由于开启了连续对话选项，导致本次对话过长，请清除部分内容后重试，或者关闭连续对话选项。`
+        )
+      else throw new Error("太长了，缩短一点吧。")
+    }
+
     const encoder = new TextEncoder()
     const decoder = new TextDecoder()
 
@@ -100,16 +139,17 @@ export async function POST({ request }: APIEvent) {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`
         },
-        timeout,
+        timeout: !timeout || Number.isNaN(timeout) ? 30000 : timeout,
         method: "POST",
         body: JSON.stringify({
-          model,
+          model: model || "gpt-3.5-turbo",
           messages: messages.map(k => ({ role: k.role, content: k.content })),
           temperature,
+          // max_tokens: 4096 - tokens,
           stream: true
         })
       }
-    ).catch((err: { message: any }) => {
+    ).catch(err => {
       return new Response(
         JSON.stringify({
           error: {

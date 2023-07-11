@@ -5,7 +5,7 @@ import mdHighlight from "markdown-it-highlightjs"
 import mdKbd from "markdown-it-kbd"
 import preWrapperPlugin from "./preWrapper"
 
-export const md = MarkdownIt({
+const md = MarkdownIt({
   linkify: true,
   breaks: true
 })
@@ -15,3 +15,5 @@ export const md = MarkdownIt({
   })
   .use(mdKbd)
   .use(preWrapperPlugin)
+
+export default md
